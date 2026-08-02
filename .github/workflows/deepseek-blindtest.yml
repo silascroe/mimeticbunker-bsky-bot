@@ -1,4 +1,4 @@
-name: DeepSeek blind preview v3.1
+name: DeepSeek blind preview
 
 on:
   workflow_dispatch:
