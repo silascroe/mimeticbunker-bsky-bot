@@ -2,7 +2,8 @@ name: Mimetic Bunker Bluesky bot
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '17,47 10-13 * * *'
+      timezone: 'America/New_York'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -50,6 +51,8 @@ jobs:
       MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
       MANUAL_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'auto' }}
       MANUAL_ESSAY_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.essay_number || '0' }}
+      TRIGGER_EVENT: ${{ github.event_name }}
+      TRIGGER_SCHEDULE: ${{ github.event.schedule || '' }}
       SUBSTACK_FEED_URL: https://mimeticbunker.substack.com/feed
 
     steps:
@@ -71,6 +74,8 @@ jobs:
           const MANUAL_RUN = process.env.MANUAL_RUN === 'true';
           const MANUAL_MODE = process.env.MANUAL_MODE || 'auto';
           const MANUAL_ESSAY_NUMBER = process.env.MANUAL_ESSAY_NUMBER || '0';
+          const TRIGGER_EVENT = process.env.TRIGGER_EVENT || 'unknown';
+          const TRIGGER_SCHEDULE = process.env.TRIGGER_SCHEDULE || '';
           const EDITORIAL_NOTES = process.env.EDITORIAL_NOTES || '';
           const EXTRA_DIRECTION = process.env.EXTRA_DIRECTION || '';
           const SERVICE = 'https://bsky.social';
@@ -78,9 +83,8 @@ jobs:
           const WRITER_MODEL = 'deepseek-v4-flash';
           const EDITOR_MODEL = 'deepseek-v4-pro';
           const MAX_POST_LENGTH = 300;
-          const DAILY_HOUR = 10;
-          const RECOVERY_HOUR = 11;
           const TIME_ZONE = 'America/New_York';
+          const DECISION_FILE = 'bot-decision.md';
           const TIMEOUT_MS = 15_000;
           const DEEPSEEK_TIMEOUT_MS = 120_000;
           const AI_BANNED_PHRASES = [
@@ -548,6 +552,8 @@ jobs:
               month: '2-digit',
               day: '2-digit',
               hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
               hourCycle: 'h23',
             });
             const parts = Object.fromEntries(
@@ -564,7 +570,12 @@ jobs:
                   86_400_000,
               ),
               hour: Number(parts.hour),
+              time: `${parts.hour}:${parts.minute}:${parts.second}`,
             };
+          }
+
+          function shouldAttemptDailyPost(manualRun, triggerEvent) {
+            return manualRun || triggerEvent === 'schedule';
           }
 
           function parseEditorialNotes(raw) {
@@ -991,7 +1002,9 @@ jobs:
               '# Mimetic Bunker bot decision',
               '',
               `**Status:** ${status}`,
-              `**Eastern date:** ${clock.date}`,
+              `**Trigger:** ${TRIGGER_EVENT}`,
+              `**Requested schedule:** ${TRIGGER_SCHEDULE || 'manual dispatch'}`,
+              `**Actual Eastern start:** ${clock.date} ${clock.time} ${TIME_ZONE}`,
             ];
             if (candidate?.item) {
               lines.push(
@@ -1038,13 +1051,13 @@ jobs:
             if (note) lines.push('', `**Note:** ${note}`);
             lines.push(
               '',
-              '**Schedule:** one post at approximately 10:17 a.m. America/New_York; 11:17 is a recovery window only if the first run was missed.',
+              '**Schedule:** attempts run at :17 and :47 from 10:00 a.m. through 1:59 p.m. America/New_York. The first delivered run posts; later runs preserve the one-post-per-day limit.',
             );
             const markdown = `${lines.join('\n')}\n`;
             if (process.env.GITHUB_STEP_SUMMARY) {
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown, 'utf8');
             }
-            fs.writeFileSync('bot-decision.md', markdown, 'utf8');
+            fs.writeFileSync(DECISION_FILE, markdown, 'utf8');
           }
 
           async function request(url, options = {}) {
@@ -1345,8 +1358,20 @@ jobs:
             }
 
             const clock = clockInNewYork(new Date('2026-08-01T14:00:00Z'));
-            if (clock.hour !== 10 || clock.date !== '2026-08-01') {
+            if (
+              clock.hour !== 10 ||
+              clock.time !== '10:00:00' ||
+              clock.date !== '2026-08-01'
+            ) {
               throw new Error('New York clock test failed.');
+            }
+            const delayedClock = clockInNewYork(new Date('2026-08-02T16:32:00Z'));
+            if (
+              delayedClock.hour !== 12 ||
+              !shouldAttemptDailyPost(false, 'schedule') ||
+              shouldAttemptDailyPost(false, 'push')
+            ) {
+              throw new Error('Delayed scheduled-run eligibility test failed.');
             }
 
             const quoteItem = {
@@ -1442,19 +1467,21 @@ jobs:
             selfTest();
             if (process.env.SELF_TEST_ONLY === 'true') return;
             const clock = clockInNewYork();
-            const dailyWindow =
-              MANUAL_RUN || clock.hour === DAILY_HOUR || clock.hour === RECOVERY_HOUR;
-            if (!dailyWindow) {
-              console.log(
-                `Morning post waits for ${DAILY_HOUR}:17 ${TIME_ZONE}; ${RECOVERY_HOUR}:17 is the fallback window. Current hour is ${clock.hour}.`,
-              );
-              return;
+            if (!shouldAttemptDailyPost(MANUAL_RUN, TRIGGER_EVENT)) {
+              throw new Error(`Unsupported workflow trigger: ${TRIGGER_EVENT}`);
             }
 
             const items = await essays();
             const latest = items[0];
             const feed = await recentFeed();
-            if (!MANUAL_RUN && feedHasPostOnDate(feed, clock.date)) {
+            const forceArchive =
+              MANUAL_RUN &&
+              (
+                MANUAL_MODE === 'archive' ||
+                Number.parseInt(MANUAL_ESSAY_NUMBER, 10) > 0 ||
+                Boolean(normalizeSpace(EXTRA_DIRECTION))
+              );
+            if (!forceArchive && feedHasPostOnDate(feed, clock.date)) {
               const note = `A Bluesky post already exists for ${clock.date}; daily limit preserved.`;
               console.log(note);
               writeDecision({ status: 'skipped-already-posted-today', clock, note });
@@ -1468,13 +1495,6 @@ jobs:
               text: buildAnnouncement(latest),
             };
             const hasAnnouncement = feedContainsLink(feed, latest.link);
-            const forceArchive =
-              MANUAL_RUN &&
-              (
-                MANUAL_MODE === 'archive' ||
-                Number.parseInt(MANUAL_ESSAY_NUMBER, 10) > 0 ||
-                Boolean(normalizeSpace(EXTRA_DIRECTION))
-              );
             let candidate;
             let diagnostics;
 
@@ -1516,13 +1536,20 @@ jobs:
           }
 
           main().catch((error) => {
+            if (!fs.existsSync(DECISION_FILE)) {
+              writeDecision({
+                status: 'failed',
+                clock: clockInNewYork(),
+                note: truncate(error instanceof Error ? error.message : error, 500),
+              });
+            }
             console.error(error instanceof Error ? error.stack : error);
             process.exitCode = 1;
           });
           BOT
 
-      - name: Verify manual decision output
-        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+      - name: Verify bot decision output
+        if: ${{ always() }}
         shell: bash
         run: test -s bot-decision.md
 
