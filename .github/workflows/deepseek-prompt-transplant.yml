@@ -8,6 +8,14 @@ on:
         required: true
         default: '0'
         type: string
+      writer_model:
+        description: 'DeepSeek model used by both anonymous writers'
+        required: true
+        default: 'deepseek-v4-flash'
+        type: choice
+        options:
+          - 'deepseek-v4-flash'
+          - 'deepseek-v4-pro'
       target_form:
         description: 'Genre used for the substantial transformation'
         required: true
@@ -23,7 +31,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deepseek-prompt-transplant
+  group: deepseek-prompt-transplant-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +41,7 @@ jobs:
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       ESSAY_NUMBER: ${{ inputs.essay_number }}
+      WRITER_MODEL: ${{ inputs.writer_model }}
       TARGET_FORM: ${{ inputs.target_form }}
       EXTRA_DIRECTION: ${{ inputs.extra_direction }}
 
@@ -54,8 +63,8 @@ jobs:
           const path = require('node:path');
 
           const API_URL = 'https://api.deepseek.com/chat/completions';
-          const WRITER_MODEL = 'deepseek-v4-pro';
-          const AUDIT_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro'];
+          const WRITER_MODEL = process.env.WRITER_MODEL || 'deepseek-v4-flash';
+          const AUDIT_MODELS = ['deepseek-v4-pro'];
           const DONOR_REPOSITORY = 'asgeirtj/system_prompts_leaks';
           const DONOR_COMMIT = '656021e2fb804aa60b6f75b3ea29ffcfcf26bd85';
           const DONOR_PROMPTS = [
@@ -680,11 +689,11 @@ jobs:
 
           function consensusStatus(votes) {
             const verdicts = votes.map((vote) => vote.verdict);
-            if (verdicts.length === 2 && verdicts.every((value) => value === 'supported')) {
+            if (verdicts.length && verdicts.every((value) => value === 'supported')) {
               return 'approved';
             }
             if (
-              verdicts.length === 2 &&
+              verdicts.length &&
               verdicts.every((value) => value === 'unsupported')
             ) {
               return 'rejected';
@@ -1045,6 +1054,12 @@ jobs:
             ) {
               throw new Error('Rejected consensus self-test failed.');
             }
+            if (consensusStatus([{ verdict: 'supported' }]) !== 'approved') {
+              throw new Error('Single-auditor approval self-test failed.');
+            }
+            if (consensusStatus([{ verdict: 'unsupported' }]) !== 'rejected') {
+              throw new Error('Single-auditor rejection self-test failed.');
+            }
             if (
               consensusStatus([{ verdict: 'supported' }, { verdict: 'borderline' }]) !==
               'manual'
@@ -1101,6 +1116,9 @@ jobs:
             }
             if (!process.env.GITHUB_STEP_SUMMARY) {
               throw new Error('GITHUB_STEP_SUMMARY is unavailable.');
+            }
+            if (!['deepseek-v4-flash', 'deepseek-v4-pro'].includes(WRITER_MODEL)) {
+              throw new Error('writer_model must be deepseek-v4-flash or deepseek-v4-pro.');
             }
 
             const targetForm = normalizeSpace(process.env.TARGET_FORM);
