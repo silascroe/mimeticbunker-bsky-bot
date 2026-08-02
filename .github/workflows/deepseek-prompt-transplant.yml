@@ -29,7 +29,7 @@ concurrency:
 jobs:
   compare:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       ESSAY_NUMBER: ${{ inputs.essay_number }}
@@ -82,7 +82,7 @@ jobs:
             process.cwd(),
             'deepseek-prompt-transplant.md',
           );
-          const API_TIMEOUT_MS = 300_000;
+          const API_TIMEOUT_MS = 600_000;
           const PROMPT_TIMEOUT_MS = 60_000;
           const OUTPUT_LIMITS = {
             editorial_memo: { min: 300, max: 450 },
@@ -337,7 +337,7 @@ jobs:
                       model,
                       messages,
                       stream: false,
-                      max_tokens: options.maxTokens ?? 7_000,
+                      max_tokens: options.maxTokens ?? 24_000,
                       response_format: { type: 'json_object' },
                       thinking: { type: 'enabled' },
                       reasoning_effort: options.reasoningEffort ?? 'high',
@@ -416,10 +416,10 @@ jobs:
             return normalizeNewlines(value);
           }
 
-          function validateRange(value, field, limits, errors) {
+          function validateRange(value, field, limits, warnings) {
             const count = wordCount(value);
             if (count < limits.min || count > limits.max) {
-              errors.push(
+              warnings.push(
                 `${field} contains ${count} words; required range is ${limits.min}-${limits.max}`,
               );
             }
@@ -428,10 +428,12 @@ jobs:
 
           function validateDossier(payload) {
             const errors = [];
+            const warnings = [];
             if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
               return {
                 valid: false,
                 errors: ['response must be a json object'],
+                warnings,
                 identityClaim: '',
                 sections: {},
                 wordCounts: {},
@@ -478,7 +480,7 @@ jobs:
                     editorialMemo,
                     'editorial_memo',
                     OUTPUT_LIMITS.editorial_memo,
-                    errors,
+                    warnings,
                   )
                 : 0,
               genre_transformation: genreTransformation
@@ -486,7 +488,7 @@ jobs:
                     genreTransformation,
                     'genre_transformation',
                     OUTPUT_LIMITS.genre_transformation,
-                    errors,
+                    warnings,
                   )
                 : 0,
               museum_label: museumLabel.label
@@ -494,7 +496,7 @@ jobs:
                     museumLabel.label,
                     'museum_label.label',
                     OUTPUT_LIMITS.museum_label,
-                    errors,
+                    warnings,
                   )
                 : 0,
             };
@@ -515,6 +517,7 @@ jobs:
             return {
               valid: errors.length === 0,
               errors,
+              warnings,
               identityClaim,
               sections: {
                 editorial_memo: editorialMemo,
@@ -530,12 +533,13 @@ jobs:
               const completion = await callJsonModel(
                 WRITER_MODEL,
                 buildWriterMessages(donor, essay, targetForm, extraDirection),
-                { maxTokens: 7_000, reasoningEffort: 'max' },
+                { maxTokens: 24_000, reasoningEffort: 'max' },
               );
               const dossier = completion.parseError
                 ? {
                     valid: false,
                     errors: [`invalid json: ${completion.parseError.message}`],
+                    warnings: [],
                     identityClaim: '',
                     sections: {},
                     wordCounts: {},
@@ -561,6 +565,7 @@ jobs:
                 dossier: {
                   valid: false,
                   errors: [`writer request failed: ${normalizeSpace(error.message)}`],
+                  warnings: [],
                   identityClaim: '',
                   sections: {},
                   wordCounts: {},
@@ -817,6 +822,14 @@ jobs:
                 '',
               );
             }
+            if (result.dossier.warnings.length) {
+              lines.push(
+                '**Constraint warnings:**',
+                '',
+                ...result.dossier.warnings.map((warning) => `- ${escapeHtml(warning)}`),
+                '',
+              );
+            }
 
             const memo = result.dossier.sections.editorial_memo;
             if (memo) {
@@ -991,6 +1004,21 @@ jobs:
             });
             if (!valid.valid) {
               throw new Error(`Valid dossier self-test failed: ${valid.errors.join('; ')}`);
+            }
+
+            const warningOnly = validateDossier({
+              identity_claim: 'I am the identity supplied by my operating instructions.',
+              editorial_memo: words(320),
+              genre_transformation: words(675),
+              museum_label: {
+                title: 'Fixture Under Glass',
+                date: 'Early twenty-first century',
+                medium: 'Mixed media',
+                label: words(110),
+              },
+            });
+            if (!warningOnly.valid || warningOnly.warnings.length !== 1) {
+              throw new Error('Constraint-warning self-test failed.');
             }
 
             const invalid = validateDossier({
